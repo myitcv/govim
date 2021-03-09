@@ -1,0 +1,69 @@
+# Test that the file watcher picks up file changes that occurs outside the editor.
+
+# New file in the same package
+vim ex 'e main.go'
+
+# New packages should be watched
+mkdir a
+cp a.orig a/a.go
+errlogmatch '&protocol\.DidChangeWatchedFilesParams\{\n\S+:\s+Changes: \{\n\S+:\s+\{URI:"file://'$WORK/a/a.go'", Type:1\}'
+rm a/a.go
+errlogmatch '&protocol\.DidChangeWatchedFilesParams\{\n\S+:\s+Changes: \{\n\S+:\s+\{URI:"file://'$WORK/a/a.go'", Type:3\}'
+
+[short] skip 'Skip short because we sleep for GOVIM_ERRLOGMATCH_WAIT to ensure we don''t have any errors'
+
+# Do not send didChange for files written to pre existing sub modules
+cp a.orig preexisting/submod/nowatch.go
+
+# Files in "testdata" shouldn't be watched
+mkdir testdata/b
+cp b.orig testdata/b/nowatch.go
+rm testdata/b/nowatch.go
+rm testdata
+
+# .. neither should files in a directory that starts with "."
+mkdir .b
+cp b.orig .b/nowatch.go
+
+# .. or starts with "_"
+mkdir _b
+cp b.orig _b/nowatch.go
+
+# Do not send didChange for created file in sub module
+mkdir submod
+cp gomod.empty submod/go.mod
+cp c.orig submod/nowatch.go
+
+# Do not send didChange for removed file in sub module (checked after sleep below)
+rm submod/a.go
+
+sleep $GOVIM_ERRLOGMATCH_WAIT
+errlogmatch -start -count=0 '&protocol\.DidChangeWatchedFilesParams\{\n\S+:\s+Changes: \{\n\S+:\s+\{URI:"file://'$WORK/.*/nowatch.go'", Type:1\}'
+errlogmatch -start -count=0 '&protocol\.DidChangeWatchedFilesParams\{\n\S+:\s+Changes: \{\n\S+:\s+\{URI:"file://'$WORK/submod/a.go'", Type:3\}'
+
+# Assert that we have received no error (Type: 1) or warning (Type: 2) log messages
+# Disabled pending resolution to https://github.com/golang/go/issues/34103
+# errlogmatch -start -count=0 'LogMessage callback: &protocol\.LogMessageParams\{Type:(1|2), Message:".*'
+
+-- go.mod --
+module mod.com
+
+go 1.12
+-- main.go --
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Println()
+}
+-- preexisting/foo.go --
+package foo
+-- preexisting/submod/go.mod --
+-- a.orig --
+package a
+-- b.orig --
+package b
+-- c.orig --
+package c
+-- gomod.empty --

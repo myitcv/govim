@@ -75,6 +75,9 @@ export GOVIM_RUN_INSTALL_TESTSCRIPTS=true
 # Turn on gopls verbose logging by default
 export GOVIM_GOPLS_VERBOSE_OUTPUT=true
 
+# Turn on logging of raw file watcher events
+export GOVIM_FILEWATCHER_DEBUG=true
+
 go generate $(go list ./... | grep -v 'govim/internal/golang_org_x_tools')
 go run ./internal/cmd/dots go test $(go list ./... | grep -v 'govim/internal/golang_org_x_tools')
 

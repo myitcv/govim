@@ -25,8 +25,9 @@ type modWatcher struct {
 	// root is the directory root of the watch
 	root string
 
-	// watches is the set of current watches "open" in the watcher
-	watches map[string]bool
+	// submodules is a set of paths under root that contain a go.mod file. Events that
+	// occur in any of those are filtered since they do not belong to this module.
+	submodules map[string]bool
 }
 
 func (m *modWatcher) close() error { return m.watcher.Close() }
@@ -34,9 +35,8 @@ func (m *modWatcher) close() error { return m.watcher.Close() }
 // newWatcher returns a new watcher that will "watch" on the Go files in the
 // module identified by gomodpath
 func newModWatcher(plug *govimplugin, gomodpath string) (*modWatcher, error) {
-	w, err := fswatcher.New(gomodpath, &plug.tomb)
-	if err != nil {
-		return nil, err
+	infof := func(format string, args ...interface{}) {
+		plug.Logf("file watcher event: "+format, args...)
 	}
 
 	dirpath := filepath.Dir(gomodpath)
@@ -45,30 +45,23 @@ func newModWatcher(plug *govimplugin, gomodpath string) (*modWatcher, error) {
 		return nil, fmt.Errorf("could not resolve dir from go.mod path %v: %v", gomodpath, err)
 	}
 
+	w, err := fswatcher.New(dirpath, eventFilter(dirpath), infof, &plug.tomb)
+	if err != nil {
+		return nil, err
+	}
+
 	res := &modWatcher{
 		govimplugin: plug,
 		watcher:     w,
 		root:        dirpath,
-		watches:     make(map[string]bool),
+		submodules:  make(map[string]bool),
 	}
 
 	go res.watch()
-	// fake event to kick start the watching
-	res.watcher.Events() <- fswatcher.Event{
-		Path: dirpath,
-		Op:   fswatcher.OpChanged,
-	}
-
 	return res, nil
 }
 
 func (m *modWatcher) watch() {
-	errf := func(format string, args ...interface{}) {
-		m.Logf("**** file watcher error: "+format, args...)
-	}
-	infof := func(format string, args ...interface{}) {
-		m.Logf("file watcher event: "+format, args...)
-	}
 	eventCh := m.watcher.Events()
 	errCh := m.watcher.Errors()
 
@@ -79,81 +72,15 @@ func (m *modWatcher) watch() {
 				// watcher has been stopped?
 				return
 			}
-			switch event.Op {
-			case fswatcher.OpRemoved:
-				path := event.Path
-				var didFind bool
-				for ew := range m.watches {
-					if event.Path == ew || strings.HasPrefix(ew, event.Path+string(os.PathSeparator)) {
-						didFind = true
-						if err := m.watcher.Remove(ew); err != nil {
-							errf("failed to remove watch on %v: %v", ew, err)
-						}
-						infof("removed watch on %v", ew)
-					}
-				}
-				if didFind {
-					// it was a directory
-					continue
-				}
-				if !ofInterest(path) {
-					continue
-				}
-				m.Enqueue(func(govim.Govim) error {
-					return m.vimstate.handleEvent(event)
-				})
-			case fswatcher.OpChanged, fswatcher.OpCreated:
-				path := event.Path
-				dirInfo, err := os.Stat(path)
-				if err != nil {
-					errf("failed to stat %v: %v", path, err)
-					continue
-				}
-				if !dirInfo.IsDir() {
-					// Is Vim handling this file? Is this a file we care about?
-					if !ofInterest(path) {
-						continue
-					}
-					m.Enqueue(func(govim.Govim) error {
-						return m.vimstate.handleEvent(event)
-					})
-					continue
-				}
 
-				// Walk the dir that is event.Name. Because fsnotify isn't recursive,
-				// we must manually install watches ourselves.
-				// Note that this has a race condition:
-				// https://github.com/govim/govim/issues/492
-				err = filepath.Walk(event.Path, func(path string, info os.FileInfo, err error) error {
-					if err != nil {
-						return err
-					}
-					if !info.IsDir() {
-						return nil
-					}
-
-					// We have a dir
-					switch filepath.Base(path)[0] {
-					case '.', '_':
-						return filepath.SkipDir
-					}
-					if path != m.root {
-						// check we are not in a submodule
-						if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
-							return filepath.SkipDir
-						}
-					}
-					err = m.watcher.Add(path)
-					if err != nil {
-						m.watches[path] = true
-						infof("added watch on %v", path)
-					}
-					return err
-				})
-				if err != nil {
-					errf("failed to walk %v: %v", event.Path, err)
-				}
+			if !ofInterest(event.Path) {
+				continue
 			}
+
+			m.Enqueue(func(govim.Govim) error {
+				return m.vimstate.handleEvent(event)
+			})
+
 		case err, ok := <-errCh:
 			if !ok {
 				// watcher has been stopped?
@@ -162,6 +89,39 @@ func (m *modWatcher) watch() {
 			// TODO: handle this case better
 			m.Logf("***** file watcher error: %v", err)
 		}
+	}
+}
+
+func eventFilter(root string) func(string) bool {
+	return func(path string) bool {
+		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+			path = filepath.Dir(path)
+		}
+
+		// TODO: cache ignored directories to reduce amount of os.Stat(...) calls
+		rel := strings.TrimPrefix(path, root)
+		parts := strings.Split(rel, string(os.PathSeparator))
+		if len(parts) == 0 {
+			return false
+		}
+
+		curr := parts[0]
+		for i := 1; i < len(parts); i++ {
+			dir := parts[i]
+			switch dir[0] {
+			case '.', '_':
+				return true
+			}
+			if dir == "testdata" {
+				return true
+			}
+
+			curr = filepath.Join(curr, dir)
+			if _, err := os.Stat(filepath.Join(root, curr, "go.mod")); err == nil {
+				return true
+			}
+		}
+		return false
 	}
 }
 

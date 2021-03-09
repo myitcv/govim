@@ -1,3 +1,4 @@
+//go:build darwin
 // +build darwin
 
 package fswatcher
@@ -13,17 +14,19 @@ import (
 	"gopkg.in/tomb.v2"
 )
 
-const fRemoved = fsevents.ItemRemoved | fsevents.ItemRenamed
-const fChanged = fsevents.ItemModified | fsevents.ItemChangeOwner
-const fCreated = fsevents.ItemCreated
+const (
+	fRemoved = fsevents.ItemRemoved | fsevents.ItemRenamed
+	fChanged = fsevents.ItemModified | fsevents.ItemChangeOwner
+	fCreated = fsevents.ItemCreated
+)
 
 type fswatcher struct {
 	eventCh chan Event
 	es      *fsevents.EventStream
 }
 
-func New(gomodpath string, tomb *tomb.Tomb) (*FSWatcher, error) {
-	dirpath := filepath.Dir(gomodpath)
+func New(root string, skipDir WatchFilterFn, logf LogFn, tomb *tomb.Tomb) (*FSWatcher, error) {
+	dirpath := filepath.Dir(root)
 	dev, err := fsevents.DeviceForPath(dirpath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve device for path %v: %v", dirpath, err)
@@ -68,6 +71,10 @@ func New(gomodpath string, tomb *tomb.Tomb) (*FSWatcher, error) {
 				event := events[i]
 				path := filepath.Join(mountPoint, event.Path)
 
+				if skipDir(path) {
+					continue
+				}
+
 				// Darwin might include both "created" and "changed" in the same event
 				// so ordering matters below. The "created" case should be checked
 				// before "changed" to get a behavior that is more consistent with other
@@ -89,8 +96,6 @@ func New(gomodpath string, tomb *tomb.Tomb) (*FSWatcher, error) {
 	return &FSWatcher{&fswatcher{eventCh, es}}, nil
 }
 
-func (w *fswatcher) Add(path string) error    { return nil }
-func (w *fswatcher) Remove(path string) error { return nil }
 func (w *fswatcher) Close() error {
 	w.es.Stop()
 	return nil
